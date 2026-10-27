@@ -9,3 +9,12 @@ WHERE status = 'completed' AND order_amount > 500
 GROUP BY customer_id
 HAVING SUM(order_amount) > 8000
 ORDER BY total DESC;
+
+-- Q2: three-table join -- completed revenue by city and product category
+SELECT c.city, p.category, ROUND(SUM(o.order_amount), 2) AS revenue
+FROM orders o
+JOIN customers c ON o.customer_id = c.customer_id
+JOIN products p ON o.product_id = p.product_id
+WHERE o.status = 'completed'
+GROUP BY c.city, p.category
+ORDER BY revenue DESC;
