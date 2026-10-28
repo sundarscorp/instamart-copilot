@@ -17,7 +17,8 @@ _TODO: one paragraph on what the Copilot does and how Parts A to D connect._
 6. python part_a/clean.py            # writes data/clean/customers.csv, products.csv, orders.csv
 7. python part_a/store.py            # builds data/instamart.db from sql/schema.sql
 8. python part_a/validate.py         # expect: ALL CHECKPOINTS PASSED
-# 9. ... add each Part's script here as you build it
+9. python part_a/sql_analysis.py     # runs sql/queries.sql Q1-Q7; expect: ALL QUERIES MATCH REFERENCE
+# 10. ... add each Part's script here as you build it
 ```
 
 ## Part A
