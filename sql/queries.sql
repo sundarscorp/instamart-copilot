@@ -33,3 +33,21 @@ LEFT JOIN orders o
        ON o.customer_id = c.customer_id AND o.status = 'completed'
 WHERE o.status IS NULL
 ORDER BY c.customer_id;
+
+-- Q5: common table expressions -- customers whose total completed spend is above the average customer total
+WITH customer_totals AS (
+    SELECT customer_id, SUM(order_amount) AS total_spend
+    FROM orders o
+    WHERE o.status = 'completed'
+    GROUP BY customer_id
+),
+avg_total AS (
+    SELECT AVG(total_spend) AS avg_spend
+    FROM customer_totals
+)
+SELECT ct.customer_id,
+       ROUND(ct.total_spend, 2) AS total_spend,
+       ROUND(a.avg_spend, 2)    AS avg_spend
+FROM customer_totals ct, avg_total a
+WHERE ct.total_spend > a.avg_spend
+ORDER BY ct.total_spend DESC;
