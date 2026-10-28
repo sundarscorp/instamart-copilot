@@ -18,12 +18,193 @@ _TODO: one paragraph on what the Copilot does and how Parts A to D connect._
 7. python part_a/store.py            # builds data/instamart.db from sql/schema.sql
 8. python part_a/validate.py         # expect: ALL CHECKPOINTS PASSED
 9. python part_a/sql_analysis.py     # runs sql/queries.sql Q1-Q7; expect: ALL QUERIES MATCH REFERENCE
-# 10. ... add each Part's script here as you build it
+10. python part_a/eda.py             # pandas cross-check + statistics; expect: EDA MATCHES REFERENCE
+# 11. ... add each Part's script here as you build it
 ```
 
 ## Part A
 
-_TODO: audit table, cleaning rules with rows changed, SQL results, pandas cross-check, EDA answers._
+Part A turns the dirty raw exports into a trusted SQLite database. Scripts live in `part_a/`, SQL in `sql/`, and each script checks its own output against the brief's reference values. All amounts are in INR.
+
+| Step | Script | Output |
+|---|---|---|
+| Audit the raw data | `part_a/audit.py` | audit tables (below) |
+| Clean customers and orders | `part_a/clean.py` | `data/clean/customers.csv`, `products.csv`, `orders.csv` |
+| Store | `part_a/store.py` + `sql/schema.sql` | `data/instamart.db` (tables `customers`, `products`, `orders`) |
+| Validate | `part_a/validate.py` | prints `ALL CHECKPOINTS PASSED` (15 checks) |
+| SQL analysis | `sql/queries.sql` run by `part_a/sql_analysis.py` | Q1–Q7 results (below) |
+| pandas cross-check and EDA | `part_a/eda.py` | statistics (below) |
+
+### A2. Raw data audit
+
+Reading rule: only an empty cell counts as missing (`keep_default_na=False, na_values=[""]`). With pandas' default, the text `N/A` in `order_amount` is silently read as missing, which hides 53 of the 120 unparseable amounts.
+
+**orders.csv** — 13,084 rows × 9 columns
+
+| column | dtype | missing | missing % |
+|---|---|---:|---:|
+| order_id | str | 0 | 0.00% |
+| customer_id | str | 0 | 0.00% |
+| product_id | str | 0 | 0.00% |
+| quantity | int64 | 0 | 0.00% |
+| order_ts | str | 0 | 0.00% |
+| status | str | 0 | 0.00% |
+| discount_pct | int64 | 0 | 0.00% |
+| order_amount | str | 0 | 0.00% |
+| delivery_minutes | float64 | 2,541 | 19.42% |
+
+`order_amount` is read as text because it contains non-numeric entries.
+
+**customers.csv** — 1,200 rows × 5 columns
+
+| column | dtype | missing | missing % |
+|---|---|---:|---:|
+| customer_id | str | 0 | 0.00% |
+| city | str | 0 | 0.00% |
+| signup_date | str | 0 | 0.00% |
+| age | float64 | 61 | 5.08% |
+| gender | str | 30 | 2.50% |
+
+**products.csv** — 40 rows × 4 columns, no missing values (product_id, product_name, category: str; price_inr: int64).
+
+**Audit figures** (all match the reference)
+
+| check | value |
+|---|---:|
+| orders.csv rows | 13,084 |
+| exact duplicate rows | 119 |
+| rows with status = pending | 656 |
+| distinct order_id | 12,309 |
+| non-numeric order_amount (67 `error`, 53 `N/A`) | 120 |
+| negative delivery_minutes | 106 |
+| blank delivery_minutes | 2,541 |
+| blank age | 61 |
+| age outside 10–100 | 6 |
+| distinct raw city spellings | 24 |
+| distinct non-blank gender spellings | 10 |
+| blank gender | 30 |
+
+### A3. Cleaning rules — customers
+
+| rule | values changed |
+|---|---:|
+| (a) city: strip spaces and title case (24 spellings such as `pune`, `PUNE`, ` Pune ` → 6 cities). Done first, because rule (c) groups by city. | 476 |
+| (b) gender: `male/Male/M/m/MALE` → male, `female/Female/F/f/FEMALE` → female, blank → unknown | 950 (incl. 30 blanks) |
+| (c) age outside 10–100 set to missing | 6 |
+| (c) missing age filled with the median age of the customer's city (`groupby` + `transform`) | 67 (61 blank + 6 impossible) |
+| (d) `signup_date` converted to datetime | 1,200 |
+
+City medians used: Bengaluru 42.0, Chennai 39.0, Delhi 43.0, Hyderabad 37.5, Mumbai 38.5, Pune 39.0. Ages filled from Hyderabad and Mumbai are therefore fractional (21 customers); they are kept as computed rather than rounded, following the brief literally.
+
+Result: Pune 227, Delhi 210, Bengaluru 197, Chennai 191, Hyderabad 191, Mumbai 184; female 610, male 560, unknown 30; 0 missing ages, every age between 18 and 60.
+
+### A4. Cleaning rules — orders (applied in this order)
+
+| # | rule | rows / values changed |
+|---|---|---:|
+| 1 | `order_ts` converted to datetime | 13,084 rows |
+| 2 | exact duplicate rows removed | 119 rows (13,084 → 12,965) |
+| 3 | one row per `order_id`: kept the record with the latest `order_ts` (the earlier `pending` record is superseded by the final status) | 656 rows (12,965 → 12,309) |
+| 4 | `order_amount` to numeric; unparseable values rebuilt as round(price_inr × quantity × (1 − discount_pct / 100), 2) | 112 values |
+| 5 | negative `delivery_minutes` set to missing | 105 values |
+| 5 | missing `delivery_minutes` of completed orders filled with the median of the product category among completed orders | 774 values |
+| 5 | cancelled orders: `delivery_minutes` left missing (never delivered, so a time would be invented data) | 1,199 left missing |
+
+The audit found 120 unparseable amounts and 106 negative delivery times, but rules 4 and 5 changed only 112 and 105: the remaining 8 and 1 sat in duplicate or pending records already removed by rules 2–3. Category medians used: Dairy 25.0, Electronics 25.0, Grocery 25.0, Personal Care 25.5, Snacks 25.0 minutes.
+
+Result: 12,309 rows (one per `order_id`); 11,110 completed, 1,199 cancelled, 0 pending; 0 missing `order_amount`; 0 missing `delivery_minutes` among completed and 1,199 among cancelled orders; completed revenue INR 2,998,668.80.
+
+### A5. Store and validate
+
+`sql/schema.sql` defines the three tables with primary keys, foreign keys (`orders.customer_id` → `customers`, `orders.product_id` → `products`) and CHECK constraints (status only `completed`/`cancelled`, non-negative amounts and delivery times), so bad data is rejected at load time. `order_ts` is stored as text `YYYY-MM-DD HH:MM:SS`. `part_a/validate.py` re-reads the saved CSV files and database and asserts 15 checkpoints (customer counts, order counts, missing values, completed revenue in both pandas and SQL, table names, row counts, timestamp format); it prints `ALL CHECKPOINTS PASSED`.
+
+### A6. SQL analysis (`sql/queries.sql`)
+
+Only completed orders count as revenue or spend.
+
+| query | technique | result | reference |
+|---|---|---|---|
+| Q1 | `WHERE` then `HAVING`: completed orders > INR 500, customer total > INR 8,000 | 30 customers (top: C0693 INR 13,776.55) | 30 |
+| Q2 | three-table join: revenue by city × category | 30 rows summing to INR 2,998,668.80; largest Bengaluru / Electronics INR 233,909.45 | same |
+| Q3 | scalar subquery: products above the average price (INR 289.32) | 11 products | 11 |
+| Q4 | `LEFT JOIN`: customers with no completed order | 25 customers (18 never ordered, 7 had only cancelled orders) | 25 |
+| Q5 | two CTEs: customers above the average customer spend | 550 customers; average INR 2,552.06 | same |
+| Q6 | `RANK()`, `DENSE_RANK()`, `ROW_NUMBER()` by city | 1,175 rows; 8 rows where RANK() ≠ ROW_NUMBER() | same |
+| Q7 | running total `SUM(revenue) OVER (ORDER BY day)` | 183 days; last cumulative INR 2,998,668.80 | same |
+
+In Q4 the status filter sits in the `ON` clause: placed in `WHERE` it removes the unmatched (NULL) rows and returns 0, and without it the query returns only the 18 customers who never ordered.
+
+**Q6 — top customer per city**
+
+| city | customer | total spend (INR) |
+|---|---|---:|
+| Bengaluru | C0082 | 12,856.20 |
+| Chennai | C0930 | 10,151.40 |
+| Delhi | C0291 | 13,742.60 |
+| Hyderabad | C0743 | 12,730.05 |
+| Mumbai | C0693 | 14,766.55 |
+| Pune | C0426 | 10,377.10 |
+
+**Q6 — rows where RANK() differs from ROW_NUMBER()**
+
+| city | customer | total spend (INR) | RANK | DENSE_RANK | ROW_NUMBER |
+|---|---|---:|---:|---:|---:|
+| Bengaluru | C0734 | 2,598.00 | 99 | 99 | 100 |
+| Bengaluru | C0723 | 135.00 | 179 | 178 | 180 |
+| Mumbai | C1053 | 396.00 | 149 | 149 | 150 |
+| Mumbai | C0608 | 280.00 | 160 | 159 | 161 |
+| Pune | C1064 | 3,236.95 | 74 | 74 | 75 |
+| Pune | C0057 | 285.00 | 189 | 188 | 190 |
+| Pune | C0936 | 285.00 | 189 | 188 | 191 |
+| Pune | C0276 | 114.00 | 209 | 206 | 210 |
+
+Why they differ: RANK() assigns the same rank (189) to tied spend values, whereas ROW_NUMBER() breaks ties by assigning unique, sequential integers (189, 190, 191) based on row processing order, which is arbitrary among the tied rows, so C0057 and C0936 could just as easily swap places. So in every tie, each row after the first gets a ROW_NUMBER() larger than its RANK(), which produces the 8 rows above.
+
+### A7. pandas cross-check and exploratory analysis
+
+**(a) Cross-check.** `pd.pivot_table(..., margins=True)` over city × category gives a grand total of INR 2,998,668.80, equal to the SQL total of Q2.
+
+| city | sum (INR) | mean (INR) | count |
+|---|---:|---:|---:|
+| Bengaluru | 523,643.40 | 276.47 | 1,894 |
+| Chennai | 463,629.15 | 272.72 | 1,700 |
+| Delhi | 502,829.80 | 243.62 | 2,064 |
+| Hyderabad | 528,589.90 | 284.95 | 1,855 |
+| Mumbai | 479,058.50 | 297.00 | 1,613 |
+| Pune | 500,918.05 | 252.48 | 1,984 |
+
+**(b) Completed `order_amount`**
+
+| statistic | value |
+|---|---:|
+| mean | INR 269.91 |
+| median | INR 135.00 |
+| skewness | 4.61 |
+| Q1 / Q3 | INR 64.80 / INR 297.00 |
+| IQR | INR 232.20 |
+| lower fence (Q1 − 1.5 IQR) | INR −283.50 (0 outliers below) |
+| upper fence (Q3 + 1.5 IQR) | INR 645.30 (897 outliers above) |
+
+Of the 897 high outliers, 635 are Electronics and 166 are Dairy (Ghee bought in 2–3 units).
+
+**Correlation matrix (completed orders)**
+
+| | order_amount | discount_pct | quantity | delivery_minutes |
+|---|---:|---:|---:|---:|
+| order_amount | 1.000 | −0.095 | 0.087 | −0.003 |
+| discount_pct | −0.095 | 1.000 | 0.000 | −0.010 |
+| quantity | 0.087 | 0.000 | 1.000 | −0.013 |
+| delivery_minutes | −0.003 | −0.010 | −0.013 | 1.000 |
+
+**Findings**
+
+*What is this data about?* This dataset covers 11,110 synthetic Instamart quick-commerce completed orders across six cities and five product categories from 1 April to 30 September 2025, with amounts recorded in INR.
+
+*What do its distributions and statistics look like?* The order values are strongly right-skewed, carrying a high skewness of 4.61. This explains why the mean of INR 269.91 is twice the median of INR 135.00: a long tail of high-value transactions pulls the average up while half of all orders remain at or below INR 135.00.
+
+*Are there outliers or anomalies?* Upper outliers account for 897 orders exceeding INR 645.30. These are legitimate purchases rather than data errors, driven primarily by higher-priced electronics alongside multi-unit buys of pricier essentials like Ghee (2–3 units). There are no lower outliers.
+
+*What relationships exist between variables?* Relationships among variables are minimal. The strongest correlation pair is order amount with discount at −0.095; order amount with quantity is +0.087, slightly weaker. Delivery time shows virtually zero correlation with any variable. A correlation this small doesn't show that one causes the other.
 
 ## Part B
 
