@@ -19,7 +19,8 @@ _TODO: one paragraph on what the Copilot does and how Parts A to D connect._
 8. python part_a/validate.py         # expect: ALL CHECKPOINTS PASSED
 9. python part_a/sql_analysis.py     # runs sql/queries.sql Q1-Q7; expect: ALL QUERIES MATCH REFERENCE
 10. python part_a/eda.py             # pandas cross-check + statistics; expect: EDA MATCHES REFERENCE
-# 11. ... add each Part's script here as you build it
+11. python part_b/segments.py        # RFM, K-means (K = 4), PCA; writes outputs/customer_segments.csv
+# 12. ... add each Part's script here as you build it
 ```
 
 ## Part A
@@ -207,6 +208,56 @@ Of the 897 high outliers, 635 are Electronics and 166 are Dairy (Ghee bought in 
 *What relationships exist between variables?* Relationships among variables are minimal. The strongest correlation pair is order amount with discount at −0.095; order amount with quantity is +0.087, slightly weaker. Delivery time shows virtually zero correlation with any variable. A correlation this small doesn't show that one causes the other.
 
 ## Part B
+
+Part B segments customers and predicts who is likely to lapse. It reads `data/clean/orders.csv` and `data/clean/customers.csv` from Part A; only completed orders count. Scripts live in `part_b/`.
+
+### B1. RFM table (`part_b/segments.py`)
+
+Snapshot moment 2025-10-01 00:00:00. Recency = whole days since the customer's last completed order; frequency = distinct completed orders; monetary = total completed spend (INR).
+
+| measure | value |
+|---|---:|
+| customers with at least one completed order | 1,175 |
+| recency median / min / max (days) | 19 / 0 / 180 |
+| frequency mean / max | 9.46 / 33 |
+| monetary mean / max (INR) | 2,552.06 / 14,766.55 |
+
+### B2. K-means on standardised RFM
+
+The three RFM columns are standardised with `StandardScaler`, then `KMeans(n_clusters=K, n_init=10, random_state=42)` is fitted for K = 2 to 8.
+
+| K | inertia | silhouette |
+|---:|---:|---:|
+| 2 | 1,820.8 | 0.465 |
+| 3 | 1,268.2 | 0.445 |
+| **4** | **743.1** | **0.526** |
+| 5 | 617.4 | 0.480 |
+| 6 | 503.2 | 0.482 |
+| 7 | 408.5 | 0.416 |
+| 8 | 366.5 | 0.412 |
+
+**Why inertia alone cannot pick K.** Inertia is the total squared distance of customers to their segment centre, and adding a segment can only move customers closer to a centre, so inertia always falls as K rises: K = 8 is always below K = 2, and at K = 1,175 every customer would be their own segment with an inertia of 0. A metric that always rewards more splitting cannot say when to stop, so K is chosen from where the improvement levels off (the elbow), the silhouette score and whether the business can act on the segments.
+
+**Model selection: K = 4.** We select K = 4 for the final customer segmentation based on both mathematical indicators and business interpretability:
+
+- **Elbow method:** inertia drops significantly from 1,268.2 at K = 3 to 743.1 at K = 4 (a reduction of 525.1), after which returns diminish sharply (4 to 5 drops by only 125.7).
+- **Silhouette analysis:** the silhouette score reaches its peak at K = 4 (0.526), indicating the most compact and clearly separated clusters among K = 2 to 8.
+- **Business segmentation:** K = 4 is the smallest cluster count that isolates high-value customers (mean spend about INR 7,130) from frequent grocery shoppers. K = 3 merges these two distinct behavioural profiles into one segment, while K = 5 only splits the low-activity customers into "fading" (about 70 days since last order) and "gone" (about 133 days), adding little actionable value at a lower silhouette (0.480).
+
+### B3. Segment profiles, names and actions (K = 4)
+
+Cluster numbers are only labels produced by K-means; they carry no order or ranking. Segments are named from their profile. The segment with the highest mean monetary value is marked Premium.
+
+| segment_id | segment name | size | mean recency (days) | mean frequency | mean monetary (INR) | premium | recommended action |
+|---:|---|---:|---:|---:|---:|---|---|
+| 1 | Premium Big Spenders | 138 | 24.1 | 6.8 | 7,129.7 | yes | VIP treatment: early access to electronics launches and priority (premium desk) support |
+| 2 | Loyal Regulars | 419 | 8.8 | 19.4 | 3,410.0 | no | Reward the habit: loyalty points or a subscription on staples, plus basket-building offers |
+| 0 | Occasional Shoppers | 436 | 28.9 | 3.8 | 1,057.6 | no | Build frequency: free delivery on the next three orders and timely restock reminders |
+| 3 | Lapsed Customers | 182 | 109.0 | 2.2 | 686.0 | no | Win back: a time-limited comeback coupon and a short "what went wrong" survey |
+
+**PCA.** `PCA(n_components=2)` on the scaled RFM matrix gives `explained_variance_ratio_` = 0.634 and 0.218 (total 0.852), so two components keep 85.2% of the RFM variance. The first component rises with frequency and monetary and falls with recency (overall engagement); the second rises with monetary and recency (high spend but less recent).
+
+Output: `outputs/customer_segments.csv` with columns customer_id, recency, frequency, monetary, segment_id, segment_name, is_premium (1,175 rows, 138 premium).
 
 ## Part C
 
