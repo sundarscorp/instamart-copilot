@@ -66,3 +66,16 @@ SELECT customer_id, city,
        ROW_NUMBER() OVER (PARTITION BY city ORDER BY total_spend DESC) AS row_num
 FROM customer_totals
 ORDER BY city, row_num;
+-- Q7: running total -- daily completed revenue with a cumulative revenue column
+WITH daily AS (
+    SELECT SUBSTR(order_ts, 1, 10) AS day,
+           SUM(order_amount) AS revenue
+    FROM orders
+    WHERE orders.status = 'completed'
+    GROUP BY day
+)
+SELECT day,
+       ROUND(revenue, 2) AS revenue,
+       ROUND(SUM(revenue) OVER (ORDER BY day), 2) AS cumulative_revenue
+FROM daily
+ORDER BY day;
