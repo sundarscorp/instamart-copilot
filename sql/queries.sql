@@ -18,3 +18,18 @@ JOIN products p ON o.product_id = p.product_id
 WHERE o.status = 'completed'
 GROUP BY c.city, p.category
 ORDER BY revenue DESC;
+
+-- Q3: scalar subquery -- products priced above the average catalogue price
+SELECT product_name, price_inr
+FROM products
+WHERE price_inr > (SELECT AVG(price_inr) FROM products)
+ORDER BY price_inr DESC;
+
+-- Q4: LEFT JOIN -- customers who have no completed order
+-- (the status filter sits in ON, not WHERE, so customers with only cancelled orders still appear)
+SELECT c.customer_id, c.city
+FROM customers c
+LEFT JOIN orders o
+       ON o.customer_id = c.customer_id AND o.status = 'completed'
+WHERE o.status IS NULL
+ORDER BY c.customer_id;
