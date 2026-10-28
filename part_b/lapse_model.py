@@ -6,6 +6,7 @@ table); the label is whether the customer has a completed order in 2025-09-01..2
 Segment labels from segments.py are NOT used as features (they include September).
 """
 import os
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
@@ -18,7 +19,7 @@ from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-CLEAN = os.path.join("data", "clean")
+CLEAN, OUT = os.path.join("data", "clean"), "outputs"
 CUTOFF = pd.Timestamp("2025-09-01")
 WINDOW_END = pd.Timestamp("2025-10-01")      # label window: 2025-09-01 .. 2025-09-30 inclusive
 
@@ -175,7 +176,47 @@ def main():
         print(f"| {label} | {rows[label][0]:.3f} | {rows[label][1]:.3f} | {rows[label][2]:.3f} |")
     (p0, r0, _), (p1, r1, _) = rows["un-balanced training"], rows["balanced training"]
     assert r1 > r0 + 0.1 and p1 <= p0 + 0.02            # recall jumps; precision does not rise
-    print("\nTASKS 4-7 CHECKED")
+    for label, model in [("un-balanced", best_lr), ("balanced", balanced_lr)]:
+        tn, fp, fn, tp = confusion_matrix(y_test, model.predict(X_test)).ravel()
+        print(f"{label}: flags {tp + fp} customers -> {tp} real lapsers caught, {fp} loyal customers targeted")
+
+    # ---------------- Task 8: interpret, persist and use ----------------
+    print("\n## Task 8: interpretation, persistence, retention list\n")
+    rf_best = searches["random forest"].best_estimator_
+    names = [n.split("__", 1)[1] for n in rf_best.named_steps["pre"].get_feature_names_out()]
+    importances = pd.Series(rf_best.named_steps["model"].feature_importances_, index=names)
+    print("random forest: top 5 feature importances")
+    for feat, imp in importances.sort_values(ascending=False).head(5).items():
+        print(f"  {feat:<24} {imp:.3f}")
+
+    coefs = pd.Series(best_lr.named_steps["model"].coef_[0], index=names)
+    print("\nlogistic regression coefficients (standardised features; + means MORE likely to lapse)")
+    for feat in ["recency", "frequency", "cancel_rate", "monetary", "tenure_days"]:
+        print(f"  {feat:<24} {coefs[feat]:+.3f}")
+
+    # (b) persist the SELECTED model (random forest pipeline: preprocessing + classifier)
+    path = os.path.join(OUT, "lapse_model.joblib")
+    os.makedirs(OUT, exist_ok=True)
+    joblib.dump(rf_best, path)
+    reloaded = joblib.load(path)
+    same = (reloaded.predict(X_test) == rf_best.predict(X_test)).all()
+    print(f"\nsaved {path}; reloaded model reproduces all {len(X_test)} test predictions exactly: {same}")
+    assert same
+
+    # (c) Premium customers in the TEST set, ranked by predicted lapse probability
+    segments = pd.read_csv(os.path.join(OUT, "customer_segments.csv")).set_index("customer_id")
+    premium_test = [cid for cid in X_test.index if bool(segments.loc[cid, "is_premium"])]
+    proba = pd.Series(reloaded.predict_proba(X_test.loc[premium_test])[:, 1], index=premium_test)
+    top = (pd.DataFrame({"customer_id": proba.index, "lapse_probability": proba.round(4).values,
+                         "actually_lapsed": y_test.loc[proba.index].values})
+           .sort_values("lapse_probability", ascending=False).head(10))
+    top.to_csv(os.path.join(OUT, "retention_list.csv"), index=False)
+    print(f"\n{len(premium_test)} Premium customers in the test set; top {len(top)} by lapse probability:")
+    print(top.to_string(index=False))
+    print(f"\n{int(top['actually_lapsed'].sum())} of {len(top)} truly lapsed. Note: the Premium flag comes from "
+          "whole-window RFM (including September), so this list is illustrative, not a leakage-free evaluation.")
+    print("wrote outputs/retention_list.csv")
+    print("\nPART B LAPSE MODEL COMPLETE")
 
 
 if __name__ == "__main__":

@@ -20,7 +20,8 @@ _TODO: one paragraph on what the Copilot does and how Parts A to D connect._
 9. python part_a/sql_analysis.py     # runs sql/queries.sql Q1-Q7; expect: ALL QUERIES MATCH REFERENCE
 10. python part_a/eda.py             # pandas cross-check + statistics; expect: EDA MATCHES REFERENCE
 11. python part_b/segments.py        # RFM, K-means (K = 4), PCA; writes outputs/customer_segments.csv
-# 12. ... add each Part's script here as you build it
+12. python part_b/lapse_model.py     # lapse model; writes outputs/lapse_model.joblib, outputs/retention_list.csv
+# 13. ... add each Part's script here as you build it
 ```
 
 ## Part A
@@ -259,8 +260,89 @@ Cluster numbers are only labels produced by K-means; they carry no order or rank
 
 Output: `outputs/customer_segments.csv` with columns customer_id, recency, frequency, monetary, segment_id, segment_name, is_premium (1,175 rows, 138 premium).
 
+### B4. Lapse problem (`part_b/lapse_model.py`)
+
+Cutoff 2025-09-01. The cohort is every customer with at least one completed order before the cutoff; `lapsed` = 1 if the customer has no completed order from 2025-09-01 to 2025-09-30.
+
+Features, built only from orders dated before the cutoff plus the clean customer table: recency (days from the cutoff to the last completed order), frequency, monetary, average discount_pct of completed orders, cancellation rate (cancelled ÷ all final-status orders before the cutoff), average delivery_minutes of completed orders, favourite product category (most frequent among completed orders, ties broken alphabetically), city, age, gender and tenure in days (cutoff minus signup_date).
+
+**Leakage controls**
+
+- No order dated 2025-09-01 or later enters any feature; the script asserts that the latest feature row is before the cutoff.
+- The segment labels from B3 are not used as features. They come from whole-window RFM that includes September: the "Lapsed Customers" segment has a 100% lapse rate in the cohort, so using it would hand the model the answer.
+- No encoder, scaler or resampler saw a test row: preprocessing sits inside a scikit-learn `Pipeline` fitted on training rows only (and refitted on each cross-validation fold), and over-sampling (B7) touches training rows only.
+
+| item | value | reference |
+|---|---:|---:|
+| cohort | 1,156 customers | 1,156 |
+| lapsed | 443 (38.32%) | 443 (38.32%) |
+| train / test rows (`train_test_split(test_size=0.2, stratify=y, random_state=42)`) | 924 / 232 | 924 / 232 |
+| baseline "always not lapsed" on test: accuracy / lapsed-class F1 | 61.6% / 0.00 | 61.6% / 0 |
+
+### B5. Preprocessing without leakage
+
+`ColumnTransformer` with `StandardScaler` on the 8 numeric features and `OneHotEncoder(drop="first")` (k−1 columns per variable) on city, gender and favourite category, giving 19 model columns (8 numeric + 11 one-hot). The code confirms no feature column contains a missing value, before or after preprocessing.
+
+| frequency mean | value |
+|---|---:|
+| learned by the fitted scaler (training rows) | 8.1147 |
+| full cohort | 8.0285 |
+
+The scaler's mean learned from the training rows (8.1147) differs from the full-cohort mean (8.0285) because it was fitted on the 924 training customers only, so the difference is evidence that no feature distribution from the 232 unseen test rows leaked into preprocessing.
+
+### B6. Train, tune and evaluate
+
+Both searches use 5-fold cross-validation on the training rows with `scoring="f1"` (lapsed = positive class). The test set was used once, after tuning finished.
+
+| model | grid | best parameters | best CV F1 |
+|---|---|---|---:|
+| `LogisticRegression(max_iter=1000)` | C ∈ {0.01, 0.1, 1, 10, 100} (25 fits) | C = 100 | 0.651 |
+| `RandomForestClassifier(n_estimators=100, random_state=42)` | max_depth ∈ {3, 5, 8} × min_samples_leaf ∈ {5, 10, 20} (45 fits) | max_depth = 8, min_samples_leaf = 10 | 0.681 |
+
+The logistic-regression grid is a statistical tie: mean CV F1 is 0.646 / 0.645 / 0.649 / 0.651 for C = 0.1 / 1 / 10 / 100 with a fold-to-fold standard deviation of about 0.03, so the winner is decided by noise. The reference reports C = 1; our favourite-category feature uses completed orders only (the brief's rule for customer behaviour), which tips the tie to C = 100. Computing it over all orders instead reproduces C = 1 (test F1 0.640).
+
+**Test set (lapsed = positive class)**
+
+| model | TN | FP | FN | TP | precision | recall | F1 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline (always "not lapsed") | 143 | 0 | 89 | 0 | 0.000 | 0.000 | 0.000 |
+| logistic regression (C = 100) | 111 | 32 | 31 | 58 | 0.644 | 0.652 | 0.648 |
+| **random forest (depth 8, leaf 10)** | 113 | 30 | 31 | 58 | 0.659 | 0.652 | **0.655** |
+
+**Model choice: random forest.** Between logistic regression and random forest, the random forest is the better choice for this retention campaign. While both models perform identically on actual lapsed customers—catching the exact same 58 True Positives and missing 31 False Negatives—the random forest achieves slightly fewer false positives (30 versus 32). In a quick-commerce context, missing a lapsing customer (False Negative) risks losing high-value customer lifetime value, making strong recall crucial, while avoiding wasted promotional budget on loyal users. Although logistic regression offers simpler coefficients for stakeholder explanations, the random forest's slightly higher precision and F1 score (0.655 versus 0.648) and its clearer lead in cross-validation (F1 0.681 versus 0.651) suggest this edge is not just luck of the test split, making it the more robust operational tool.
+
+### B7. Class-balance experiment
+
+Training rows only: every original row is kept and 216 lapsed rows are duplicated (sampled with replacement, `random_state=42`) until both classes have 570 rows. The best logistic regression is refitted on the balanced data and evaluated on the original, unchanged test set.
+
+| logistic regression | precision | recall | F1 | customers flagged | lapsers caught | loyal customers targeted |
+|---|---:|---:|---:|---:|---:|---:|
+| un-balanced training | 0.644 | 0.652 | 0.648 | 90 | 58 | 32 |
+| balanced training | 0.589 | 0.854 | 0.697 | 129 | 76 | 53 |
+
+Re-balancing the training set shifted the model's focus toward catching churners: recall jumped significantly from 0.652 to 0.854 (a ~20-percentage-point increase), while precision dropped slightly from 0.644 to 0.589. For the retention team, this trade-off means contacting a larger pool of customers and sending coupons to 53 loyal customers instead of 32, but catching 76 of the 89 lapsers instead of 58 makes this budget cost well worth avoiding the higher long-term cost of lost customer lifetime value.
+
+### B8. Interpret, persist and use
+
+**Random forest: top 5 feature importances** — frequency 0.280, monetary 0.271, recency 0.115, avg_delivery_minutes 0.061, cancel_rate 0.052.
+
+**Logistic regression coefficients** (standardised features; positive = more likely to lapse)
+
+| feature | coefficient | business reading |
+|---|---:|---|
+| frequency | −1.698 | Customers who order frequently have built a strong ordering habit, so they rarely lapse. |
+| recency | +0.040 | Customers who placed their last order longer ago are losing touch, making them slightly more likely to lapse. |
+| monetary | +0.285 | Customers who spend more at the same order frequency are occasional high-ticket buyers (for example electronics) rather than habitual daily users, making them more vulnerable to churn. |
+
+**Persistence.** The selected random-forest pipeline (preprocessing + classifier) is saved with `joblib.dump` to `outputs/lapse_model.joblib`; after `joblib.load`, the reloaded model reproduces all 232 test predictions exactly.
+
+**Retention list.** 40 test-set customers are in the Premium segment. Ranked by the model's predicted lapse probability, the top 10 (probabilities 0.452 to 0.491) are written to `outputs/retention_list.csv` (columns customer_id, lapse_probability, actually_lapsed); 1 of the 10 truly lapsed. The Premium flag comes from the whole-window RFM of B3, which includes the September window that defines the lapse label, so it is a post-hoc whole-window label and this retention list is illustrative, not a leakage-free evaluation. (The model's own features use only orders before the cutoff.)
+
 ## Part C
 
 ## Part D
 
 ## Limitations and Next Steps
+
+- **Premium flag is post-hoc (Part B).** The Premium flag comes from whole-window RFM that includes September, the same window that defines the lapse label, so it is a post-hoc whole-window label and the retention list in B8 is illustrative, not a leakage-free evaluation. A production version would build segments from pre-cutoff data only.
+- **Logistic-regression tuning is a tie (Part B).** C from 0.1 to 100 scores within 0.006 F1 in cross-validation, well inside the fold-to-fold spread, so the chosen C should not be over-interpreted.
