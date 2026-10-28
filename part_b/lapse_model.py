@@ -8,9 +8,14 @@ Segment labels from segments.py are NOT used as features (they include September
 import os
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
-from sklearn.metrics import accuracy_score, f1_score
-from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (accuracy_score, confusion_matrix, f1_score, precision_score,
+                             recall_score)
+from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 CLEAN = os.path.join("data", "clean")
@@ -105,7 +110,72 @@ def main():
           f"{Xt_train.shape[1] - len(NUMERIC)} one-hot (k-1 per nominal variable)")
     assert not np.isnan(Xt_train).any() and not np.isnan(Xt_test).any()
     print("no missing values after preprocessing")
-    print("\nTASKS 4-5 MATCH REFERENCE")
+
+    # ---------------- Task 6: tune on train, then evaluate once on test ----------------
+    print("\n## Task 6: tuning (5-fold CV on training rows, scoring = F1 of the lapsed class)\n")
+    print(f"baseline on test: accuracy {acc:.1%}, precision 0.00, recall 0.00, F1 0.00")
+    searches = {
+        "logistic regression": GridSearchCV(
+            Pipeline([("pre", make_preprocessor()), ("model", LogisticRegression(max_iter=1000))]),
+            {"model__C": [0.01, 0.1, 1, 10, 100]}, cv=5, scoring="f1"),
+        "random forest": GridSearchCV(
+            Pipeline([("pre", make_preprocessor()),
+                      ("model", RandomForestClassifier(n_estimators=100, random_state=42))]),
+            {"model__max_depth": [3, 5, 8], "model__min_samples_leaf": [5, 10, 20]},
+            cv=5, scoring="f1"),
+    }
+    for name, gs in searches.items():
+        gs.fit(X_train, y_train)                            # tuning sees TRAIN ROWS ONLY
+        n_fits = len(gs.cv_results_["params"]) * gs.n_splits_
+        best = {k.replace("model__", ""): v for k, v in gs.best_params_.items()}
+        print(f"{name}: best {best}, best CV F1 {gs.best_score_:.3f} ({n_fits} fits)")
+
+    # The logistic-regression grid is nearly flat: show every C so the tie is visible.
+    cv = searches["logistic regression"].cv_results_
+    print("\nlogistic regression CV F1 by C (mean +/- std over 5 folds):")
+    for c, mu, sd in zip(cv["param_model__C"], cv["mean_test_score"], cv["std_test_score"]):
+        print(f"  C={c:<6} {mu:.3f} +/- {sd:.3f}")
+
+    print("\n### Test-set evaluation (lapsed = positive class)\n")
+    print("| model | TN | FP | FN | TP | precision | recall | F1 |\n|---|---:|---:|---:|---:|---:|---:|---:|")
+    test_f1 = {}
+    for name, gs in searches.items():
+        pred = gs.predict(X_test)                           # first and only look at the test set
+        tn, fp, fn, tp = confusion_matrix(y_test, pred).ravel()
+        p = precision_score(y_test, pred, zero_division=0)
+        r = recall_score(y_test, pred, zero_division=0)
+        test_f1[name] = f1_score(y_test, pred, zero_division=0)
+        print(f"| {name} | {tn} | {fp} | {fn} | {tp} | {p:.3f} | {r:.3f} | {test_f1[name]:.3f} |")
+
+    # Reference: LR best C=1 (test F1 ~0.62), RF depth 8 / leaf 10 (test F1 ~0.65). The brief
+    # allows different numbers "of this order"; our LR grid is a statistical tie (see above).
+    rf = searches["random forest"]
+    assert rf.best_params_ == {"model__max_depth": 8, "model__min_samples_leaf": 10}
+    assert all(0.55 <= v <= 0.75 for v in test_f1.values()), test_f1
+    print("\nTASKS 4-6 CHECKED (both grids run; test F1 of the reference order)")
+
+    # ---------------- Task 7: over-sample the minority class (TRAINING rows only) ----------------
+    print("\n## Task 7: class-balance experiment\n")
+    train = X_train.assign(lapsed=y_train)
+    minority, majority = train[train["lapsed"] == 1], train[train["lapsed"] == 0]
+    extra = minority.sample(n=len(majority) - len(minority), replace=True, random_state=42)
+    balanced = pd.concat([train, extra])                    # every original row + duplicates
+    print(f"training rows before: {len(majority)} not lapsed / {len(minority)} lapsed; "
+          f"after: {(balanced['lapsed'] == 0).sum()} / {(balanced['lapsed'] == 1).sum()} "
+          f"({len(extra)} duplicated lapsed rows added)")
+    assert (balanced["lapsed"] == 0).sum() == (balanced["lapsed"] == 1).sum() == 570
+
+    best_lr = searches["logistic regression"].best_estimator_
+    balanced_lr = clone(best_lr).fit(balanced.drop(columns="lapsed"), balanced["lapsed"])   # same settings, new data
+    print("\n| logistic regression | precision | recall | F1 |\n|---|---:|---:|---:|")
+    rows = {}
+    for label, model in [("un-balanced training", best_lr), ("balanced training", balanced_lr)]:
+        pred = model.predict(X_test)                        # same untouched test set
+        rows[label] = (precision_score(y_test, pred), recall_score(y_test, pred), f1_score(y_test, pred))
+        print(f"| {label} | {rows[label][0]:.3f} | {rows[label][1]:.3f} | {rows[label][2]:.3f} |")
+    (p0, r0, _), (p1, r1, _) = rows["un-balanced training"], rows["balanced training"]
+    assert r1 > r0 + 0.1 and p1 <= p0 + 0.02            # recall jumps; precision does not rise
+    print("\nTASKS 4-7 CHECKED")
 
 
 if __name__ == "__main__":
