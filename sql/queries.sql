@@ -51,3 +51,18 @@ SELECT ct.customer_id,
 FROM customer_totals ct, avg_total a
 WHERE ct.total_spend > a.avg_spend
 ORDER BY ct.total_spend DESC;
+-- Q6: ranking window functions -- each customer's completed spend ranked within their city
+WITH customer_totals AS (
+    SELECT c.customer_id, c.city, SUM(o.order_amount) AS total_spend
+    FROM orders o
+    JOIN customers c ON c.customer_id = o.customer_id
+    WHERE o.status = 'completed'
+    GROUP BY c.customer_id, c.city
+)
+SELECT customer_id, city,
+       ROUND(total_spend, 2) AS total_spend,
+       RANK() OVER (PARTITION BY city ORDER BY total_spend DESC) AS rnk,
+       DENSE_RANK() OVER (PARTITION BY city ORDER BY total_spend DESC) AS dense_rnk,
+       ROW_NUMBER() OVER (PARTITION BY city ORDER BY total_spend DESC) AS row_num
+FROM customer_totals
+ORDER BY city, row_num;
