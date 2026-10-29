@@ -11,6 +11,7 @@ import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import pandas as pd
 
@@ -43,10 +44,21 @@ def run(body):
     message = str(body.get("message", "")).strip()
     if not message:
         return 400, {"error": "message is required"}
-    limits = {k: body[k] for k in ("max_iterations", "token_limit", "time_limit_seconds") if k in body}
+    limits = {}
+    for key, label, cast in [("max_iterations", "Max model calls", int), ("token_limit", "Token limit", int),
+                             ("time_limit_seconds", "Time limit (s)", float)]:
+        if key not in body:
+            continue
+        try:
+            value = cast(str(body[key]).strip())
+        except ValueError:
+            value = -1
+        if value < 0:                                   # blank, text, decimals for whole-number fields, negatives
+            kind = "a number" if cast is float else "a whole number"
+            return 400, {"error": f"'{label}' must be {kind} of 0 or more."}
+        limits[key] = value
     run_id = f"ui-{int(time.time() * 1000)}"
-    result = agent.run_agent(message, body.get("scenario_id") or "custom", run_id=run_id,
-                             **{k: (float(v) if k == "time_limit_seconds" else int(v)) for k, v in limits.items()})
+    result = agent.run_agent(message, body.get("scenario_id") or "custom", run_id=run_id, **limits)
     return 200, result
 
 
@@ -60,24 +72,26 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        path = urlsplit(self.path).path              # ignore any ?query string
+        if path in ("/", "/index.html"):
             with open(INDEX_HTML, "rb") as f:
                 return self._send(200, f.read(), "text/html; charset=utf-8")
-        if self.path == "/api/scenarios":
+        if path == "/api/scenarios":
             return self._send(200, scenarios())
-        if self.path in ("/vendor/react.production.min.js", "/vendor/react-dom.production.min.js"):
-            with open(os.path.join("frontend", self.path.lstrip("/")), "rb") as f:   # React, shipped locally
+        if path in ("/vendor/react.production.min.js", "/vendor/react-dom.production.min.js"):
+            with open(os.path.join("frontend", path.lstrip("/")), "rb") as f:   # React, shipped locally
                 return self._send(200, f.read(), "text/javascript; charset=utf-8")
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
         routes = {"/api/ask": ask, "/api/agent": run}
-        if self.path not in routes:
+        path = urlsplit(self.path).path
+        if path not in routes:
             return self._send(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
-            code, payload = routes[self.path](body)
+            code, payload = routes[path](body)
         except Exception as err:                       # report errors to the page, keep serving
             code, payload = 500, {"error": f"{type(err).__name__}: {err}"}
         self._send(code, payload)

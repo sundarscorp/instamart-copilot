@@ -110,7 +110,7 @@ function statusTone(status) {
   if (!status) return "info";
   if (status === "REFUND") return "good";
   if (status === "ESCALATE") return "info";
-  if (status.startsWith("FALLBACK")) return "warn";
+  if (status.startsWith("FALLBACK") || status === "NEEDS_INFO") return "warn";   // hand-off or a question back, not a refusal
   return "bad";   // DENIED, NOT_FOUND
 }
 
