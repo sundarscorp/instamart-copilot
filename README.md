@@ -447,7 +447,7 @@ Full runs, no token budget; accuracy is measured against `true_category` over th
 
 Every zero-shot error is a fraud or technical ticket predicted as billing. The mock does not read the example content: the `EXAMPLES:` marker makes it check fraud and technical keywords before billing, so with the mock the examples change the token cost but not the accuracy; with a real model their content would matter.
 
-> **TODO (Sundar): 3–4 sentences, in your own words — when are the extra few-shot tokens worth paying for?** Facts to use: the few-shot prompt costs 174.3 vs 61.8 tokens per classified ticket (about 2.8 times, 25,624 vs 9,088 tokens per run) and lifts accuracy from 85.7% to 100%; the 21 fixed errors are 11 fraud tickets and 10 technical tickets that zero-shot sent to billing; fraud tickets go to the security team with HIGH priority, so a fraud ticket misrouted to the billing queue is the costly mistake. Say when you would pay for few-shot, and when zero-shot would be acceptable.
+**When the few-shot tokens are worth paying for.** Few-shot prompting is worth the ~2.8x token cost (174.3 vs 61.8 tokens per ticket) because it lifts accuracy from 85.7% to 100% on the 147 classified tickets. Zero-shot misclassifies 21 tickets (11 fraud and 10 technical) as billing, and the 11 fraud tickets drop into the normal support queue with normal priority instead of reaching the security team with high priority. Since fraud tickets require immediate high-priority security intervention, misclassifying them delays critical response, making the token premium a necessary investment for correct routing. Zero-shot would be acceptable if fraud detection were handled by a separate upstream filter or if the token budget were severely constrained.
 
 ### C7. Token budget, routing and outputs
 
@@ -492,7 +492,7 @@ Each document is split into 40-word chunks with a 10-word overlap (a new chunk s
 
 `TfidfVectorizer()` is fitted on the chunk texts; a query is transformed with the same fitted vectorizer and chunks are ranked by `cosine_similarity`. `retrieve(query, k=3)` returns `[{"source", "score", "text"}, ...]`. For the query "refund policy late delivery" the top three chunks all come from refund_policy.txt (scores 0.2719, 0.2514, 0.2454).
 
-> **TODO (Sundar): two sentences, in your own words — what do TF and IDF each measure, and one limitation of TF-IDF here?** Hints: TF is about how often a word appears in this chunk; IDF is about how rare the word is across all 15 chunks, so common words like "order" count less. For the limitation, think about a customer who writes "money back" when the policy says "refund": TF-IDF only matches the same words, not the same meaning.
+**TF, IDF and a limitation.** Term Frequency (TF) measures how often a term appears within a specific chunk, while Inverse Document Frequency (IDF) scales down words that appear across many chunks to discount background noise. The primary limitation is strict lexical matching: TF-IDF relies on exact word overlap rather than semantic intent, meaning it fails to connect a customer query like "money back" to a policy document using "refund".
 
 ### D3. Augment and answer
 
@@ -512,7 +512,7 @@ With overlap 0, two answerable questions break even though the right document is
 - "What delivery time makes a completed order eligible for a full refund?" → answer "receives a full refund of the order amount." (missing "more than 45 minutes")
 - "How soon is money returned when a payment fails but is deducted?" → the answer sentence is cut off before "48 hours".
 
-> **TODO (Sundar): 2–3 sentences, in your own words — why do these two questions break with zero overlap?** Hint: look at where the 40-word boundary falls in refund_policy.txt and payment_policy.txt. With overlap 0, the sentence holding the answer is split across two chunks, so the half the model receives no longer contains the fact. With a 10-word overlap, the next chunk repeats the end of the previous one, so the whole sentence survives in at least one chunk.
+**Why zero overlap breaks these questions.** Without overlap, rigid 40-word chunk boundaries split critical sentences across two chunks, leaving neither fragment with the complete factual answer. A 10-word overlap ensures boundary content repeats, preserving the full sentence within at least one retrievable chunk.
 
 ### D5. Tools
 
@@ -560,7 +560,9 @@ After every tool observation the agent writes a checkpoint `state/<run_id>.json`
 
 ### D9. ReAct vs plan-and-execute
 
-> **TODO (Sundar): at most 250 words, in your own words.** Compare this ReAct agent with a plan-and-execute design that asks the model for the whole step list once and replans only on error. Cover: (1) model calls and tokens, using the measured counts (S1: 5 calls and 1,122 tokens; S5: 3 calls; S6: 2 calls; S7: stopped at 6), (2) what each design does with an unexpected observation such as NOT_FOUND (S6) or a cancelled order (S5), and (3) which design you would choose for this refund workflow and why.
+1. **Model calls and token efficiency.** Plan-and-execute is actually cheaper than ReAct, as it asks the model once for the full plan upfront and then executes tools programmatically without continuous model calls (taking about 1–2 model calls compared to ReAct's 5 for S1). ReAct's value lies in adaptability, not token efficiency.
+2. **Handling anomalies.** ReAct adapts dynamically to unexpected states. For S6 (NOT_FOUND), a plan-and-execute framework would error and trigger a costly replanning call, whereas for S5 (a cancelled order), a rigid plan might blindly carry on to calculate and issue a refund. ReAct reads "cancelled" in the tool output and naturally stops after 3 calls.
+3. **Looping risk and choice.** Conversely, a fixed plan cannot get stuck in an un-converging tool loop like S7 did (which hit 6 calls and 3,270 tokens), because it runs its pre-determined steps only once. However, for a financial workflow where safety and fast bail-outs on invalid states like cancelled orders are paramount, ReAct remains the superior choice due to its transparent, step-by-step grounding.
 
 ### D10. Front end (React)
 
