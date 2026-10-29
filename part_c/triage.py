@@ -16,8 +16,12 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath("."))          # mock_llm.py lives at the repository root
 import mock_llm                                    # noqa: E402  (supplied file, used unmodified)
 
-RAW = os.path.join("data", "raw")
+RAW, OUT = os.path.join("data", "raw"), "outputs"
 MAX_INPUT_TOKENS = 400
+DEMO_BUDGET, FINAL_BUDGET = 6000, 100000
+OUTPUT_COLUMNS = ["ticket_id", "customer_id", "status", "category", "segment_name",
+                  "priority", "route", "tokens_used"]
+HUMAN_REVIEW = {"skipped_empty", "flagged_long", "flagged_invalid_output", "budget_exhausted"}
 
 # Applied IN THIS ORDER: emails first, so digits inside an address are never half-masked
 # by the phone or order-id patterns.
@@ -104,6 +108,28 @@ def validate(reply):
     return "flagged_invalid_output", ""               # valid JSON, category outside the list
 
 
+def route(results):
+    """Task 7 routing. Reads the Part B segments; a customer with no segment row is not premium."""
+    seg = pd.read_csv(os.path.join(OUT, "customer_segments.csv")).set_index("customer_id")
+    r = results.copy()
+    r["segment_name"] = r["customer_id"].map(seg["segment_name"]).fillna("")
+    premium = r["customer_id"].map(seg["is_premium"]).fillna(False).astype(bool)
+
+    def decide(row, is_premium):
+        if row["status"] in HUMAN_REVIEW:
+            return "human_review", "NORMAL"
+        if row["category"] == "fraud":
+            return "security_team", "HIGH"
+        if is_premium:
+            return "premium_desk", "HIGH"
+        return "support_queue", "NORMAL"
+
+    decided = [decide(row, p) for (_, row), p in zip(r.iterrows(), premium)]
+    r["route"] = [d[0] for d in decided]
+    r["priority"] = [d[1] for d in decided]
+    return r[OUTPUT_COLUMNS]
+
+
 def run_pipeline(tickets, system_prompt, token_budget=None):
     """Triage every ticket in file order; return one result row per ticket plus run stats."""
     mock_llm.reset()                                    # independent batch run
@@ -187,7 +213,49 @@ def main():
     assert stats["transient_errors"] == 19 and len(waits) == 19
     assert all(n == 0 and 0.045 <= w <= 0.0575 for n, w in stats["waits"])
     assert (counts["classified_json"], counts["classified_keyword"], counts["flagged_invalid_output"]) == (135, 12, 9)
-    print("\nTASKS 1-5 MATCH REFERENCE")
+    print("TASKS 1-5 MATCH REFERENCE")
+
+    # ---------------- Task 6: zero-shot vs few-shot ----------------
+    print("\n## Task 6: zero-shot vs few-shot (no token budget)\n")
+    truth = tickets.set_index("ticket_id")["true_category"]
+    runs = {"zero-shot": result, "few-shot": run_pipeline(tickets, FEW_SHOT)[0]}
+    print("| prompt | classified | correct | accuracy | total tokens | tokens per classified ticket |")
+    print("|---|---:|---:|---:|---:|---:|")
+    acc = {}
+    for name, r in runs.items():
+        done = r[r["status"].isin(["classified_json", "classified_keyword"])]
+        correct = (done["category"].values == truth.loc[done["ticket_id"]].values).sum()
+        acc[name] = correct / len(done)
+        total = r["tokens_used"].sum()
+        print(f"| {name} | {len(done)} | {correct} | {acc[name]:.1%} | {total:,} | {total / len(done):.1f} |")
+    assert round(acc["zero-shot"], 3) == 0.857 and acc["few-shot"] == 1.0
+
+    zs = runs["zero-shot"]
+    zs_done = zs[zs["status"].isin(["classified_json", "classified_keyword"])]
+    confusion = pd.crosstab(truth.loc[zs_done["ticket_id"]].values, zs_done["category"].values,
+                            rownames=["true"], colnames=["predicted"])
+    print("\nzero-shot confusion table (rows = true category, columns = predicted)\n")
+    print(confusion.to_string())
+
+    # ---------------- Task 7: budget, routing, outputs ----------------
+    print("\n## Task 7: token budget and routing\n")
+    os.makedirs(OUT, exist_ok=True)
+    demo, demo_stats = run_pipeline(tickets, ZERO_SHOT, token_budget=DEMO_BUDGET)
+    n_exhausted = int((demo["status"] == "budget_exhausted").sum())
+    route(demo).to_csv(os.path.join(OUT, "triage_budget_demo.csv"), index=False)
+    print(f"budget demo: zero-shot, TOKEN_BUDGET = {DEMO_BUDGET:,}: {demo_stats['tokens']:,} tokens used, "
+          f"{n_exhausted} tickets budget_exhausted -> outputs/triage_budget_demo.csv")
+    assert n_exhausted >= 1
+
+    final, final_stats = run_pipeline(tickets, FEW_SHOT, token_budget=FINAL_BUDGET)
+    final = route(final)
+    final.to_csv(os.path.join(OUT, "triage_results.csv"), index=False)
+    print(f"final run: few-shot, TOKEN_BUDGET = {FINAL_BUDGET:,}: {final_stats['tokens']:,} tokens used "
+          f"-> outputs/triage_results.csv ({len(final)} rows)\n")
+    print(pd.crosstab(final["route"], final["priority"]).to_string())
+    print("\nstatus counts:", dict(Counter(final["status"])))
+    assert len(final) == 164 and list(final.columns) == OUTPUT_COLUMNS
+    print("\nPART C COMPLETE")
 
 
 if __name__ == "__main__":

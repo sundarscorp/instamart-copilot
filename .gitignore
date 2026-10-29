@@ -6,3 +6,5 @@ __pycache__/
 .ipynb_checkpoints/
 scratch.sql
 Claude outputs/
+outputs/ui_refund_ledger.jsonl
+state/ui/
